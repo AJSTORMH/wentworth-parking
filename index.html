@@ -4,6 +4,7 @@
 .booking-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:14px 0 22px}.summary-tile{padding:17px;border:1px solid #34475f;background:#162940;border-radius:14px}.summary-tile span{display:block;color:#a9bed8;font-size:12px}.summary-tile strong{display:block;font-size:25px;margin-top:6px}.booking-table-wrap{overflow-x:auto;border:1px solid #34475f;border-radius:14px}.booking-table{width:100%;border-collapse:collapse;min-width:840px}.booking-table th{background:#203450;text-transform:uppercase;letter-spacing:.06em;font-size:11px;color:#c4d8f4;text-align:left;padding:14px 12px}.booking-table td{border-top:1px solid #30425b;padding:15px 12px;font-size:13px}.booking-table tbody tr:nth-child(even){background:#15243a}.booking-table tbody tr:hover{background:#203450}.money-cell{font-weight:700;font-variant-numeric:tabular-nums}.owed{color:#ffcf83}.settled{color:#8be4ba}.book-sub{display:block;color:#a9bed8;font-size:12px;margin-top:4px}.book-tools{display:flex;gap:8px;flex-wrap:wrap}.subnote{font-size:12px;color:#a9bed8;margin-top:10px}@media(max-width:700px){.booking-summary{grid-template-columns:1fr}.booking-table{min-width:780px}}
 </style></head><body><main class="shell"><header class="top"><div class="logo"><div class="mark">🅿</div><div><h1>Wentworth Parking Manager</h1><div class="muted">Shop 107 · 8 Nuvolari Place · Lot 339</div></div></div><div class="toolbar"><span id="mode" class="pill">Supabase live</span><span id="identity" class="pill">Signed out</span><button id="logout" class="btn hidden">Sign out</button></div></header>
 <section id="auth" class="panel hidden"><h2>Secure sign in</h2><p>Sign in with one of the two approved administrator accounts.</p><div class="field"><label>Email</label><input id="email" type="email" autocomplete="username"></div><div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password"></div><button id="signin" class="btn primary full">Sign in</button><p id="autherror" class="error"></p></section>
+<section id="recovery" class="panel hidden" style="max-width:440px;margin:60px auto"><h2>Set a new password</h2><p>Enter a new password for your Wentworth Parking Manager account.</p><div class="field"><label>New password (at least 8 characters)</label><input id="newpassword" type="password" autocomplete="new-password"></div><div class="field"><label>Confirm new password</label><input id="confirmpassword" type="password" autocomplete="new-password"></div><button id="updatepassword" class="btn primary full">Save new password</button><p id="recoverymsg" class="small" role="status"></p></section>
 <section id="app" class="hidden"><div class="notice"><b>Shared live database</b><div class="muted">Bookings and payments are stored in Supabase. Both administrators have full access. Enter real customer information only after verifying the security checklist.</div></div>
 <div class="gridstats"><div class="stat"><div class="muted">Total positions</div><div class="number">10</div></div><div class="stat"><div class="muted">Commercial tenants</div><div class="number">4</div></div><div class="stat"><div class="muted">Externally occupied today</div><div id="occupied" class="number">0</div></div><div class="stat"><div class="muted">Available today</div><div id="available" class="number kpi">6</div></div></div>
 <div class="tabs"><button class="btn active" data-tab="parking">Parking map</button><button class="btn" data-tab="bookings">All bookings</button><button class="btn owneronly" data-tab="finance">Income & payments</button><button class="btn owneronly" data-tab="admin">Administrator settings</button></div>
@@ -22,14 +23,15 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const money=n=>new Intl.NumberFormat('en-AU',{style:'currency',currency:'AUD'}).format(Number(n)||0);
 const today=()=>{let d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
 const days=(a,b)=>Math.max(0,Math.round((Date.parse(b+'T00:00:00Z')-Date.parse(a+'T00:00:00Z'))/86400000)+1)||0;
+let recoveryMode=false;
 let user=null,units=[],bookings=[],rates=[],financials=[],payments=[],admins=[],selected='P5',editId=null,tab='parking',refreshing=false;
 const rental=u=>u.allocation==='rental'&&u.active;
 const due=b=>b.status==='cancelled'?0:Math.round(Number(financials.find(f=>f.booking_id===b.booking_id)?.weekly_rate||0)*days(b.start_date,b.end_date)/7*100)/100;
 const received=b=>payments.filter(p=>p.booking_id===b.booking_id).reduce((sum,p)=>sum+Number(p.amount),0);
 const unitName=id=>units.find(u=>u.unit_id===id)?.display_name||id;
 const showError=e=>{console.error(e);alert(e?.message||String(e))};
-function authView(signedIn){$('auth').classList.toggle('hidden',signedIn);$('app').classList.toggle('hidden',!signedIn);$('logout').classList.toggle('hidden',!signedIn);$('identity').textContent=signedIn?(user?.email||'Administrator'):'Signed out';$('mode').textContent='Supabase live';}
-async function checkLogin(){const {data,error}=await sb.auth.getUser();if(error||!data.user){user=null;authView(false);return}const {data:allowed,error:roleError}=await sb.from('app_admins').select('user_id').eq('user_id',data.user.id).maybeSingle();if(roleError||!allowed){user=null;authView(false);$('autherror').textContent='This account does not have parking administrator access.';await sb.auth.signOut();return}user=data.user;authView(true);await refresh();}
+function authView(signedIn){if(recoveryMode)return;$('auth').classList.toggle('hidden',signedIn);$('app').classList.toggle('hidden',!signedIn);$('logout').classList.toggle('hidden',!signedIn);$('identity').textContent=signedIn?(user?.email||'Administrator'):'Signed out';$('mode').textContent='Supabase live';}
+async function checkLogin(){if(recoveryMode)return;const {data,error}=await sb.auth.getUser();if(error||!data.user){user=null;authView(false);return}const {data:allowed,error:roleError}=await sb.from('app_admins').select('user_id').eq('user_id',data.user.id).maybeSingle();if(roleError||!allowed){user=null;authView(false);$('autherror').textContent='This account does not have parking administrator access.';await sb.auth.signOut();return}user=data.user;authView(true);await refresh();}
 async function refresh(){if(!user||refreshing)return;refreshing=true;try{const queries=await Promise.all([sb.from('parking_units').select('*').order('unit_id'),sb.from('unit_rates').select('*'),sb.from('bookings').select('*').order('start_date',{ascending:false}),sb.from('booking_financials').select('*'),sb.from('payments').select('*').order('paid_on',{ascending:false}),sb.from('app_admins').select('user_id')]);const err=queries.find(q=>q.error);if(err)throw err.error;[units,rates,bookings,financials,payments,admins]=queries.map(q=>q.data||[]);render();}catch(e){showError(e)}finally{refreshing=false}}
 const current=b=>b.status==='active'&&b.start_date<=today()&&b.end_date>=today();
 const booked=id=>bookings.find(b=>b.unit_id===id&&current(b));
@@ -52,7 +54,40 @@ $('signin').onclick=async()=>{const btn=$('signin');btn.disabled=true;$('autherr
 $('logout').onclick=async()=>{await sb.auth.signOut();user=null;authView(false)};
 $('save').onclick=saveBooking;$('cancel').onclick=cancelBooking;$('clear').onclick=resetForm;$('saverates').onclick=saveRates;$('export').onclick=exportCsv;
 $('space').onchange=()=>{selected=$('space').value;$('bookingprice').value=rates.find(r=>r.unit_id===selected)?.weekly_rate??0;updateHint();preview()};['bookingprice','start','end'].forEach(id=>$(id).addEventListener('input',preview));document.querySelectorAll('[data-tab]').forEach(x=>x.onclick=()=>{tab=x.dataset.tab;render()});
-sb.auth.onAuthStateChange((event)=>{if(event==='SIGNED_OUT'){user=null;authView(false)}});
-authView(false);checkLogin();setInterval(()=>{if(user)refresh()},15000);
+function showRecovery(){
+ recoveryMode=true;
+ $('auth').classList.add('hidden');
+ $('app').classList.add('hidden');
+ $('recovery').classList.remove('hidden');
+ $('logout').classList.add('hidden');
+ $('identity').textContent='Password reset';
+}
+$('updatepassword').onclick=async()=>{
+ const password=$('newpassword').value, confirmPassword=$('confirmpassword').value;
+ const msg=$('recoverymsg');msg.textContent='';
+ if(password.length<8){msg.textContent='Use at least 8 characters.';return}
+ if(password!==confirmPassword){msg.textContent='The passwords do not match.';return}
+ $('updatepassword').disabled=true;
+ try{
+  const {error}=await sb.auth.updateUser({password});
+  if(error)throw error;
+  msg.textContent='Password updated successfully. You can now sign in.';
+  await sb.auth.signOut();
+  recoveryMode=false;
+  $('recovery').classList.add('hidden');
+  $('newpassword').value='';$('confirmpassword').value='';
+  authView(false);
+  $('autherror').textContent='Password updated. Sign in with your new password.';
+ }catch(e){msg.textContent=e.message||String(e)}
+ finally{$('updatepassword').disabled=false}
+};
+sb.auth.onAuthStateChange((event)=>{
+ if(event==='PASSWORD_RECOVERY'){showRecovery()}
+ if(event==='SIGNED_OUT'&&!recoveryMode){user=null;authView(false)}
+});
+// A recovery link may be exchanged before the auth event listener fires.
+const recoveryLink=location.hash.includes('type=recovery')||new URLSearchParams(location.search).get('type')==='recovery';
+if(recoveryLink)showRecovery();else authView(false);
+checkLogin();setInterval(()=>{if(user&&!recoveryMode)refresh()},15000);
 
 </script></body></html>
